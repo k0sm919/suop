@@ -28,10 +28,6 @@ def get_user(data, uid):
     return data["users"][uid]
 
 # ---------- Состояния ----------
-# user_states[uid] = {
-#     "state": "topup" | "add_name" | "add_price" | "add_desc" | "add_photo" | "add_deliver",
-#     "data": {...}
-# }
 user_states = {}
 
 # ---------- Клавиатуры ----------
@@ -61,6 +57,55 @@ def skip_kb():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("⏭ Пропустить", "❌ Отмена")
     return kb
+
+# ---------- Клавиатура листания каталога ----------
+def catalog_nav_kb(idx, total):
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    prev_btn = types.InlineKeyboardButton("⬅️", callback_data=f"nav_{idx-1}") if idx > 0 \
+        else types.InlineKeyboardButton("·", callback_data="noop")
+    next_btn = types.InlineKeyboardButton("➡️", callback_data=f"nav_{idx+1}") if idx < total - 1 \
+        else types.InlineKeyboardButton("·", callback_data="noop")
+    counter = types.InlineKeyboardButton(f"{idx+1}/{total}", callback_data="noop")
+    kb.row(prev_btn, counter, next_btn)
+    kb.row(types.InlineKeyboardButton("🛍 Купить", callback_data=f"buy_{idx}"))
+    kb.row(types.InlineKeyboardButton("🏠 В меню", callback_data="close_catalog"))
+    return kb
+
+# ---------- Отправка одного товара ----------
+def send_product(chat_id, idx, edit_message_id=None):
+    data = load_data()
+    products = data["products"]
+    if not products:
+        bot.send_message(chat_id, "Каталог пуст.", reply_markup=catalog_menu())
+        return
+    idx = max(0, min(idx, len(products) - 1))
+    p = products[idx]
+    caption = f"📦 {p['name']}\n💵 Цена: {p['price']} ₽"
+    kb = catalog_nav_kb(idx, len(products))
+
+    if edit_message_id:
+        # Редактируем существующее сообщение
+        try:
+            if p.get("photo"):
+                media = types.InputMediaPhoto(p["photo"], caption=caption)
+                bot.edit_message_media(media, chat_id=chat_id, message_id=edit_message_id, reply_markup=kb)
+            else:
+                bot.edit_message_text(caption, chat_id=chat_id, message_id=edit_message_id, reply_markup=kb)
+        except Exception:
+            # Если редактировать нельзя (был текст, стал фото, или наоборот) — удаляем и отправляем заново
+            try:
+                bot.delete_message(chat_id, edit_message_id)
+            except Exception:
+                pass
+            if p.get("photo"):
+                bot.send_photo(chat_id, p["photo"], caption=caption, reply_markup=kb)
+            else:
+                bot.send_message(chat_id, caption, reply_markup=kb)
+    else:
+        if p.get("photo"):
+            bot.send_photo(chat_id, p["photo"], caption=caption, reply_markup=kb)
+        else:
+            bot.send_message(chat_id, caption, reply_markup=kb)
 
 # ---------- /start ----------
 @bot.message_handler(commands=["start"])
@@ -124,19 +169,31 @@ def topup_amount(message):
 @bot.message_handler(func=lambda m: m.text == "🛒 Каталог")
 def catalog(message):
     data = load_data()
-    products = data["products"]
-    if not products:
+    if not data["products"]:
         bot.send_message(message.chat.id, "Каталог пуст.", reply_markup=catalog_menu())
         return
     bot.send_message(message.chat.id, "🛒 Каталог товаров:", reply_markup=catalog_menu())
-    for i, p in enumerate(products):
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🛍 Купить", callback_data=f"buy_{i}"))
-        caption = f"📦 {p['name']}\n💵 Цена: {p['price']} ₽"
-        if p.get("photo"):
-            bot.send_photo(message.chat.id, p["photo"], caption=caption, reply_markup=kb)
-        else:
-            bot.send_message(message.chat.id, caption, reply_markup=kb)
+    send_product(message.chat.id, 0)
+
+# ---------- Навигация по каталогу ----------
+@bot.callback_query_handler(func=lambda c: c.data.startswith("nav_"))
+def nav_product(call):
+    idx = int(call.data.split("_")[1])
+    bot.answer_callback_query(call.id)
+    send_product(call.message.chat.id, idx, edit_message_id=call.message.message_id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "noop")
+def noop(call):
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "close_catalog")
+def close_catalog(call):
+    bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    bot.send_message(call.message.chat.id, "Главное меню", reply_markup=main_menu())
 
 # ---------- Покупка ----------
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
@@ -153,31 +210,26 @@ def buy_product(call):
         bot.answer_callback_query(call.id, "❌ Недостаточно средств.", show_alert=True)
         return
 
-    # Списываем
     u["balance"] -= product["price"]
     u["purchases"] += 1
     save_data(data)
 
     bot.answer_callback_query(call.id, "✅ Покупка совершена!")
 
-    # 1) Подтверждение покупки
     bot.send_message(call.message.chat.id,
                      f"✅ Вы купили: {product['name']}\n"
                      f"💵 Списано: {product['price']} ₽\n"
                      f"💰 Остаток баланса: {u['balance']} ₽")
 
-    # 2) Описание (только после покупки!)
     desc = product.get("description")
     if desc:
         bot.send_message(call.message.chat.id, f"📝 Описание:\n\n{desc}")
 
-    # 3) Товар/фото-выдача (только после покупки)
     deliver = product.get("deliver_photo")
     if deliver:
         bot.send_photo(call.message.chat.id, deliver, caption="🎁 Ваш товар:")
     else:
-        # если фото-выдачи нет — просто текстом
-        bot.send_message(call.message.chat.id, "🎁 Ваш товар выдан (фото не задано админом).")
+        bot.send_message(call.message.chat.id, "🎁 Товар выдан (фото не задано админом).")
 
 # ---------- Назад ----------
 @bot.message_handler(func=lambda m: m.text == "⬅️ Назад")
@@ -185,7 +237,7 @@ def back(message):
     user_states.pop(message.from_user.id, None)
     bot.send_message(message.chat.id, "Главное меню", reply_markup=main_menu())
 
-# ---------- /add — пошаговое добавление ----------
+# ---------- /add ----------
 @bot.message_handler(commands=["add"])
 def add_start(message):
     if message.from_user.id != ADMIN_ID:
@@ -263,9 +315,7 @@ def add_photo(message):
         bot.send_message(message.chat.id, "⚠️ Отправьте фото или нажмите «⏭ Пропустить».")
         return
 
-    # Фото
-    file_id = message.photo[-1].file_id
-    user_states[uid]["data"]["photo"] = file_id
+    user_states[uid]["data"]["photo"] = message.photo[-1].file_id
     user_states[uid]["state"] = "add_deliver"
     bot.send_message(message.chat.id,
                      "Шаг 5/5. Отправьте **фото-выдачу** — оно отправится покупателю **после покупки**.\n"
@@ -291,20 +341,20 @@ def add_deliver(message):
     else:
         d["deliver_photo"] = message.photo[-1].file_id
 
-    # Сохраняем товар
     data = load_data()
     data["products"].append({
         "name": d["name"],
         "price": d["price"],
         "description": d["description"],
-        "photo": d.get("photo"),
-        "deliver_photo": d.get("deliver_photo")
+       )
+ "photo": d.get("photo"),
+        "del   iver_photo": d.get("deliver_photo")
     })
-    save_data(data)
+    save_data(data save)
     user_states.pop(uid, None)
 
-    bot.send_message(message.chat.id,
-                     f"✅ Товар добавлен:\n\n"
+    bot.send_message(message_data.chat.id,
+                     f"✅ Това(dataр добавлен:\n\n"
                      f"📦 {d['name']}\n"
                      f"💵 {d['price']} ₽\n"
                      f"📝 Описание: {'есть' if d['description'] else '—'}\n"
@@ -328,7 +378,6 @@ def del_product(message):
         bot.reply_to(message, "⚠️ Товар с таким номером не найден.")
         return
     removed = data["products"].pop(idx)
-    save_data(data)
     bot.reply_to(message, f"🗑 Удалён товар: {removed['name']}")
 
 # ---------- /list ----------
