@@ -346,7 +346,6 @@ def add_deliver(message):
         "name": d["name"],
         "price": d["price"],
         "description": d["description"],
-       )
  "photo": d.get("photo"),
         "del   iver_photo": d.get("deliver_photo")
     })
